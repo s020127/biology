@@ -1,0 +1,150 @@
+import re
+from Bio import SeqIO
+from Bio.Seq import Seq
+
+def parse_gtf(gtf_file):
+    """
+    Parse GTF file and extract CDS and UTR regions for protein coding transcripts.
+    """
+    cds_utr_regions = {}
+
+    with open(gtf_file, 'r') as f:
+        for line in f:
+            if not line.startswith("#"):
+                fields = line.strip().split("\t")
+                if len(fields) >= 9:
+                    attributes = dict(re.findall(r'(\S+) "([^"]+)";', fields[8]))
+                    feature_type = fields[2]
+                    transcript_id = attributes.get('transcript_id')
+                    chromosome = fields[0]  # Chromosome 정보 파싱
+                    if transcript_id and attributes.get('transcript_type') == 'protein_coding':
+                        if transcript_id not in cds_utr_regions:
+                            cds_utr_regions[transcript_id] = {'CDS': [], 'UTR': [], 'Chromosome': chromosome}
+                        if feature_type == 'CDS':
+                            cds_utr_regions[transcript_id]['CDS'].append((int(fields[3]), int(fields[4]), fields[6]))
+                        elif feature_type == 'UTR':
+                            cds_utr_regions[transcript_id]['UTR'].append((int(fields[3]), int(fields[4]), fields[6]))
+
+    # 정렬
+    for transcript_id, regions in cds_utr_regions.items():
+        cds_utr_regions[transcript_id]['CDS'] = sorted(regions['CDS'], key=lambda x: x[0])
+        cds_utr_regions[transcript_id]['UTR'] = sorted(regions['UTR'], key=lambda x: x[0])
+
+    return cds_utr_regions
+
+def divide_utrs(cds_utr_regions):
+    """
+    Divide UTRs into 5' and 3' based on the location relative to CDS.
+    """
+    for transcript_id, regions in cds_utr_regions.items():
+        cds_regions = regions['CDS']
+        utr_regions = regions['UTR']
+
+        if utr_regions:
+            utr_5 = []
+            utr_3 = []
+
+            for utr_start, utr_end, strand in utr_regions:
+                # 정렬된 CDS의 시작점과 비교하여 5'UTR 또는 3'UTR로 분류
+                if strand == '+':
+                    if utr_end < cds_regions[0][0]:
+                        utr_5.append((utr_start, utr_end, strand))
+                    elif utr_start > cds_regions[-1][1]:
+                        utr_3.append((utr_start, utr_end, strand))
+                else:
+                    if utr_start > cds_regions[-1][1]:
+                        utr_5.append((utr_start, utr_end, strand))
+                    elif utr_end < cds_regions[0][0]:
+                        utr_3.append((utr_start, utr_end, strand))
+                
+
+            cds_utr_regions[transcript_id]['UTR_5'] = utr_5
+            cds_utr_regions[transcript_id]['UTR_3'] = utr_3
+    
+    return cds_utr_regions
+
+def calculate_gc_ratio(sequence):
+    """
+    Calculate the GC ratio of a DNA sequence.
+    """
+    gc_count = sequence.count('G') + sequence.count('C')
+    total_bases = len(sequence)
+    if total_bases == 0:
+        return 0
+    gc_ratio = (gc_count / total_bases) * 100
+    print("1")
+    return gc_ratio 
+
+def get_sequence_for_regions(chromosome_sequence, regions):
+    """
+    Extract sequences from the chromosome sequence based on the provided regions.
+    """
+    extracted_sequence = ''
+    for start, end, strand in regions:
+        sequence = chromosome_sequence[start - 1:end]
+        if strand == '-':
+            sequence = str(Seq(sequence).reverse_complement())
+        extracted_sequence += sequence
+        
+    return extracted_sequence
+
+
+def calculate_gc_ratios(cds_utr_regions, sequences):
+    """
+    Calculate GC ratios for CDS, 5'UTR, and 3'UTR regions for each transcript.
+    """
+    for transcript_id, regions in cds_utr_regions.items():
+        chromosome = regions['Chromosome']
+        chromosome_sequence = str(sequences[chromosome].seq)
+
+        cds_sequence = get_sequence_for_regions(chromosome_sequence, regions['CDS'])
+
+        cds_gc_ratio = calculate_gc_ratio(cds_sequence)
+        regions['CDS_GC_Ratio'] = cds_gc_ratio
+
+        if 'UTR_5' in regions:
+            utr_5_sequence = get_sequence_for_regions(chromosome_sequence, regions['UTR_5'])
+            utr_5_gc_ratio = calculate_gc_ratio(utr_5_sequence)
+            regions['UTR_5_GC_Ratio'] = utr_5_gc_ratio
+        else:
+            regions['UTR_5_GC_Ratio'] = None
+        
+        if 'UTR_3' in regions:
+            utr_3_sequence = get_sequence_for_regions(chromosome_sequence, regions['UTR_3'])
+            utr_3_gc_ratio = calculate_gc_ratio(utr_3_sequence)
+            regions['UTR_3_GC_Ratio'] = utr_3_gc_ratio
+        else:
+            regions['UTR_3_GC_Ratio'] = None
+        
+    return cds_utr_regions
+
+def save_results(cds_utr_regions, output_file):
+    with open(output_file, 'w') as f:
+        f.write("Transcript_ID\tChromosome\tCDS_GC_Ratio\tUTR_5_GC_Ratio\tUTR_3_GC_Ratio\n")
+        for transcript_id, regions in cds_utr_regions.items():
+            chromosome = regions['Chromosome']
+            cds_gc_ratio = regions['CDS_GC_Ratio']
+            utr_5_gc_ratio = regions.get('UTR_5_GC_Ratio', None)
+            utr_3_gc_ratio = regions.get('UTR_3_GC_Ratio', None)
+            f.write(f"{transcript_id}\t{chromosome}\t{cds_gc_ratio:.2f}\t")
+            if utr_5_gc_ratio is not None:
+                f.write(f"{utr_5_gc_ratio:.2f}\t")
+            else:
+                f.write("-\t")  # 5'UTR GC 비율이 없는 경우에는 대시 "-"를 사용하여 placeholder로 처리
+            if utr_3_gc_ratio is not None:
+                f.write(f"{utr_3_gc_ratio:.2f}\n")
+            else:
+                f.write("-\n")  # 3'UTR GC 비율이 없는 경우에는 대시 "-"를 사용하여 placeholder로 처리
+    print("Completed saving results to", output_file)
+
+# FASTA 파일 파싱
+gtf_file = "gencode.v45.basic.annotation.gtf"
+fasta_file = "GRCh38.primary_assembly.genome.fa"
+output_file = "gc_ratios3.txt"
+sequences = SeqIO.to_dict(SeqIO.parse(fasta_file, "fasta"))
+
+cds_utr_regions = parse_gtf(gtf_file)
+cds_utr_regions = divide_utrs(cds_utr_regions)
+cds_utr_regions = calculate_gc_ratios(cds_utr_regions, sequences)
+save_results(cds_utr_regions, output_file)
+
